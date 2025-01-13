@@ -1,0 +1,153 @@
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, roc_curve, roc_auc_score
+from xgboost import XGBClassifier
+from imblearn.over_sampling import SMOTE
+import seaborn as sns
+import matplotlib.pyplot as plt
+import joblib  
+import plotly.express as px
+from plotly.express.colors import qualitative
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+print(" Încarc dataset-ul...")
+dataset = pd.read_csv("/content/drive/MyDrive/healthcare-dataset-stroke-data (1).csv") 
+
+dataset.head()
+dataset.info()
+
+if 'id' in dataset.columns:
+    dataset.drop(columns=['id'], inplace=True)
+
+# Codificarea variabilelor categoriale
+categorical_columns = ['gender', 'ever_married', 'work_type', 'Residence_type', 'smoking_status']
+dataset_encoded = pd.get_dummies(dataset, columns=categorical_columns, drop_first=True)
+
+# Înlocuirea valorilor lipsă în 'bmi' cu media
+if dataset_encoded.isnull().sum().sum() > 0:
+    dataset_encoded.fillna(dataset_encoded.mean(), inplace=True)
+
+# Standardizarea variabilelor numerice
+scaler = StandardScaler()
+numerical_columns = ['age', 'avg_glucose_level', 'bmi']
+dataset_encoded[numerical_columns] = scaler.fit_transform(dataset_encoded[numerical_columns])
+joblib.dump(scaler, r'/content/drive/MyDrive/scaler.pkl')
+print(f"Scaler-ul a fost salvat.")
+
+print("Printam si numarul de valori cu stroke ca sa vedem de ce ne trebuie Oversamplig. O sa dea foarte putine cazuri cu stroke.")
+print((dataset_encoded['stroke']).value_counts())
+#Dropam si gender_Other ca ne incurca ca naiba
+if 'gender_Other' in dataset_encoded.columns:
+    dataset_encoded.drop(columns=['gender_Other'], inplace=True)
+
+categorical_columns = ['gender_Male', 'ever_married_Yes', 'work_type_Private', 
+                       'work_type_Self-employed', 'work_type_children','work_type_Never_worked',
+                       'Residence_type_Urban', 'smoking_status_formerly smoked', 
+                       'smoking_status_never smoked', 'smoking_status_smokes']
+dataset_encoded[categorical_columns] = dataset_encoded[categorical_columns].astype(int)
+
+# Separarea în features și target
+X = dataset_encoded.drop(columns=['stroke'])
+y = dataset_encoded['stroke']
+
+# Aplicarea SMOTE pentru a echilibra clasele
+print(" Aplic SMOTE pentru echilibrarea claselor...")
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X, y)
+print("Asta e Y resampled")
+print(y_resampled.value_counts())
+
+stroke_count = dataset['stroke'].value_counts()
+plt_color = qualitative.Plotly
+
+fig = px.pie(
+    stroke_count, values=stroke_count.values, names=['Nu', 'Da'], 
+    title = 'Proportie de cazuri de stroke', 
+    color_discrete_sequence=plt_color)
+
+fig.update_layout(legend_title_text = 'Stroke Status', title_x=0.3, title_y = 0.95)
+fig.show()
+
+print("Asta e X resampled")
+print(X_resampled)
+
+sns.set_style('whitegrid')
+countplt, ax = plt.subplots(figsize = (6,7))
+ax=sns.countplot(x=dataset_encoded['stroke'],hue=dataset['gender'],palette = 'YlOrBr')
+ax.set_title("Gender VS Stroke",fontsize = 15)
+
+for j in ax.patches:
+        ax.annotate(f'{round(j.get_height()/len(dataset_encoded)*100,2)} %', xy=(j.get_x() + j.get_width() / 2,  
+            j.get_height()), ha='center',  va='center',size=12, xytext=(0, 8),textcoords='offset points')
+plt.show()
+
+
+
+# Împărțirea datelor în seturi de antrenare și testare
+X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.2, random_state=42)
+
+#  Antrenarea și Evaluarea Modelului cuuu XGBoost ca svm da mai putin
+print(" Antrenez modelul XGBoost...")
+XG_classifier = XGBClassifier(random_state=42)
+XG_classifier.fit(X_train, y_train)
+
+
+# Predicție pe setul de testare
+y_pred_xg = XG_classifier.predict(X_test)
+
+# Evaluarea performanței
+XG_Accuracy = accuracy_score(y_test, y_pred_xg)
+print(f" XGBoost Accuracy: {XG_Accuracy * 100:.2f}%")
+
+# Importanța caracteristicilor
+features = X_train.columns
+importances = XG_classifier.feature_importances_
+imp_feature_xg = pd.DataFrame({'features': features, 'values': importances})
+imp_feature_xg = imp_feature_xg.sort_values(by='values', ascending=False)
+print(imp_feature_xg)
+
+# Vizualizarea importanței caracteristicilor
+plt.figure(figsize=(14, 5))
+sns.barplot(x='values', y='features', data=imp_feature_xg.sort_values(by='values', ascending=False))
+plt.xlabel('Relative Importances')
+plt.title("Feature Importances for XGBoost")
+plt.show()
+
+# Matricea de Confuzie și Metrici de Evaluare
+CM = confusion_matrix(y_test, y_pred_xg)
+print(" Confuzie Matrice:\n", CM)
+print(" True Positives:", CM[1][1])
+print(" True Negatives:", CM[0][0])
+print(" False Positives:", CM[0][1])
+print(" False Negatives:", CM[1][0])
+
+# Raport detaliat clasificare
+print("\n Classification Report:\n", classification_report(y_test, y_pred_xg))
+
+# Specificitateeeee
+specificity = CM[0][0] / (CM[0][0] + CM[0][1])
+print(f"Specificity: {specificity:.2f}")
+
+# Curba ROC și Scorul AUC
+y_score_xg = XG_classifier.predict_proba(X_test)[:, 1]
+false_positive_rate, true_positive_rate, threshold = roc_curve(y_test, y_score_xg)
+roc_auc = roc_auc_score(y_test, y_score_xg)
+print(f"ROC AUC Score for XGBoost: {roc_auc:.2f}")
+
+# Plotarea curbei ROC
+plt.figure(figsize=(10, 6))
+plt.plot(false_positive_rate, true_positive_rate, color='blue', label=f'AUC = {roc_auc:.2f}')
+plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curve for XGBoost')
+plt.legend()
+plt.show()
+
+# Salvarea și Încărcarea Modelului
+print(" Salvez modelul XGBoost...")
+joblib.dump(XG_classifier, r'/content/drive/MyDrive/xgboost_model.pkl')
+print(" Modelul XGBoost a fost salvat ca 'xgboost_stroke_model.pkl'.")
